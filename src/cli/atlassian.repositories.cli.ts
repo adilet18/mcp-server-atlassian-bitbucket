@@ -13,6 +13,7 @@ import {
 	handleCloneRepository,
 	handleGetFileContent,
 } from '../controllers/atlassian.repositories.content.controller.js';
+import { handleCreateOrUpdateFile } from '../controllers/atlassian.repositories.file.controller.js';
 
 /**
  * CLI module for managing Bitbucket repositories.
@@ -46,6 +47,7 @@ function register(program: Command): void {
 	registerCloneRepositoryCommand(program);
 	registerGetFileCommand(program);
 	registerListBranchesCommand(program);
+	registerCreateOrUpdateFileCommand(program);
 
 	methodLogger.debug('CLI commands registered successfully');
 }
@@ -448,6 +450,103 @@ function registerListBranchesCommand(program: Command): void {
 				);
 				const result = await handleListBranches(params);
 				actionLogger.debug('Successfully retrieved branches');
+
+				console.log(result.content);
+			} catch (error) {
+				actionLogger.error('Operation failed:', error);
+				handleCliError(error);
+			}
+		});
+}
+
+/**
+ * Register the command for creating or updating a file in a repository
+ * @param program - The Commander program instance
+ */
+function registerCreateOrUpdateFileCommand(program: Command): void {
+	program
+		.command('edit-files')
+		.description(
+			'Create or update a file in a Bitbucket repository. Creates a new commit with the file content.',
+		)
+		.option(
+			'-w, --workspace-slug <slug>',
+			'Workspace slug containing the repository. If not provided, uses your default workspace. Example: "myteam"',
+		)
+		.requiredOption(
+			'-r, --repo-slug <slug>',
+			'Repository slug where the file will be created or updated. Example: "project-api"',
+		)
+		.requiredOption(
+			'-f, --file-path <path>',
+			'Path to the file within the repository. For new directories, include the full path. Example: "README.md" or "src/main.js"',
+		)
+		.option(
+			'-c, --content <content>',
+			"The content of the file. This will create a new file if it doesn't exist, or update the existing file if it does. Required if --content-file is not provided.",
+		)
+		.requiredOption(
+			'-m, --message <message>',
+			'Commit message describing the change.',
+		)
+		.option(
+			'-b, --branch <branch>',
+			"Branch name to commit the file to. If omitted, uses the repository's default branch.",
+		)
+		.option(
+			'--author <author>',
+			'Optional author name for the commit. If omitted, uses the authenticated user.',
+		)
+		.option(
+			'--content-file <file>',
+			'Read file content from a file instead of providing it directly via --content. Useful for large files. Required if --content is not provided.',
+		)
+		.action(async (options) => {
+			const actionLogger = Logger.forContext(
+				'cli/atlassian.repositories.cli.ts',
+				'edit-files',
+			);
+			try {
+				actionLogger.debug('Processing command options:', options);
+
+				// Validate that either content or contentFile is provided
+				if (!options.content && !options.contentFile) {
+					throw new Error(
+						'Either --content or --content-file must be provided',
+					);
+				}
+
+				// Handle content from file if provided
+				let content = options.content;
+				if (options.contentFile) {
+					const fs = await import('fs/promises');
+					content = await fs.readFile(options.contentFile, 'utf-8');
+					actionLogger.debug(
+						`Read content from file: ${options.contentFile} (${content.length} characters)`,
+					);
+				}
+
+				if (!content) {
+					throw new Error('File content is required');
+				}
+
+				// Map CLI options to controller params
+				const requestOptions = {
+					workspaceSlug: options.workspaceSlug,
+					repoSlug: options.repoSlug,
+					filePath: options.filePath,
+					content: content,
+					message: options.message,
+					branch: options.branch,
+					author: options.author,
+				};
+
+				actionLogger.debug(
+					'Creating or updating file with options:',
+					requestOptions,
+				);
+				const result = await handleCreateOrUpdateFile(requestOptions);
+				actionLogger.debug('Successfully created/updated file');
 
 				console.log(result.content);
 			} catch (error) {

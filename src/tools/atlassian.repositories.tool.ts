@@ -16,6 +16,8 @@ import {
 	type GetFileContentToolArgsType,
 	ListBranchesToolArgs,
 	type ListBranchesToolArgsType,
+	CreateOrUpdateFileToolArgs,
+	type CreateOrUpdateFileToolArgsType,
 } from './atlassian.repositories.types.js';
 
 // Import directly from specialized controllers
@@ -30,6 +32,7 @@ import {
 	handleCloneRepository,
 	handleGetFileContent,
 } from '../controllers/atlassian.repositories.content.controller.js';
+import { handleCreateOrUpdateFile } from '../controllers/atlassian.repositories.file.controller.js';
 
 // Create a contextualized logger for this file
 const toolLogger = Logger.forContext('tools/atlassian.repositories.tool.ts');
@@ -368,6 +371,34 @@ bb_clone_repo({workspaceSlug: "my-team", repoSlug: "api-service", targetPath: ".
 		`Lists branches in a repository identified by \`workspaceSlug\` and \`repoSlug\`. Filters branches by an optional text \`query\` and supports custom \`sort\` order. Provides pagination via \`limit\` and \`cursor\`. Pagination details are included at the end of the text content. Returns branch details as Markdown with each branch's name, latest commit, and default merge strategy. Requires Bitbucket credentials.`,
 		ListBranchesToolArgs.shape,
 		listBranches,
+	);
+
+	// Register the create or update file tool
+	server.tool(
+		'bb_create_or_update_file',
+		`Creates or updates a file in a Bitbucket repository. This tool creates a new commit with the specified file content. If the file already exists, it will be updated. If the file doesn't exist, it will be created. You can also create new directories by specifying the full path (e.g., "docs/README.md" will create the "docs" directory if it doesn't exist). Requires repository write permissions. Returns commit information including commit hash, message, and author details.`,
+		CreateOrUpdateFileToolArgs.shape,
+		async (args) => {
+			const methodLogger = Logger.forContext(
+				'tools/atlassian.repositories.tool.ts',
+				'bb_create_or_update_file',
+			);
+			try {
+				methodLogger.debug('Creating or updating file:', args);
+				const result = await handleCreateOrUpdateFile(
+					args as CreateOrUpdateFileToolArgsType,
+				);
+				methodLogger.debug(
+					'Successfully created/updated file via controller',
+				);
+				return {
+					content: [{ type: 'text' as const, text: result.content }],
+				};
+			} catch (error) {
+				methodLogger.error('Failed to create/update file', error);
+				return formatErrorForMcpTool(error);
+			}
+		},
 	);
 
 	registerLogger.debug('Successfully registered Repository tools');

@@ -34,6 +34,10 @@ import {
 	BranchesResponseSchema,
 	type ListBranchesParams,
 	type BranchesResponse,
+	CreateOrUpdateFileParamsSchema,
+	FileOperationResponseSchema,
+	type CreateOrUpdateFileParams,
+	type FileOperationResponse,
 } from './vendor.atlassian.repositories.types.js';
 
 /**
@@ -646,6 +650,287 @@ async function listBranches(
 	}
 }
 
+/**
+ * Creates or updates a file in a Bitbucket repository.
+ *
+ * This creates a new commit with the file content. If the file already exists,
+ * it will be updated. If the file doesn't exist, it will be created.
+ *
+ * @param {CreateOrUpdateFileParams} params - Parameters for the request
+ * @param {string} params.workspace - The workspace slug or UUID
+ * @param {string} params.repo_slug - The repository slug or UUID
+ * @param {string} params.file_path - The file path within the repository
+ * @param {string} params.content - The file content
+ * @param {string} params.message - The commit message
+ * @param {string} [params.branch] - The branch name to commit to (defaults to main branch)
+ * @param {string} [params.author] - Optional author name for the commit
+ * @returns {Promise<FileOperationResponse>} Promise containing the commit information
+ * @throws {Error} If parameters are invalid, credentials are missing, or API request fails
+ * @example
+ * // Create or update a file
+ * const commit = await createOrUpdateFile({
+ *   workspace: 'my-workspace',
+ *   repo_slug: 'my-repo',
+ *   file_path: 'README.md',
+ *   content: '# My Project\n\nDescription...',
+ *   message: 'Update README.md',
+ *   branch: 'main'
+ * });
+ */
+async function createOrUpdateFile(
+	params: CreateOrUpdateFileParams,
+): Promise<FileOperationResponse> {
+	const methodLogger = Logger.forContext(
+		'services/vendor.atlassian.repositories.service.ts',
+		'createOrUpdateFile',
+	);
+	methodLogger.debug(
+		`Creating or updating file ${params.file_path} in ${params.workspace}/${params.repo_slug}`,
+	);
+
+	// Validate params with Zod
+	try {
+		CreateOrUpdateFileParamsSchema.parse(params);
+	} catch (error) {
+		if (error instanceof z.ZodError) {
+			methodLogger.error(
+				'Invalid parameters provided to create/update file:',
+				error.format(),
+			);
+			throw createApiError(
+				`Invalid parameters: ${error.issues.map((e) => e.message).join(', ')}`,
+				400,
+				error,
+			);
+		}
+		throw error;
+	}
+
+	const credentials = getAtlassianCredentials();
+	if (!credentials) {
+		throw createAuthMissingError(
+			'Atlassian credentials are required for this operation',
+		);
+	}
+
+	// Get repository details to determine the default branch if not provided
+	let branch = params.branch;
+	if (!branch) {
+		methodLogger.debug(
+			`No branch provided, fetching repository details to get default branch`,
+		);
+		try {
+			const repoDetails = await get({
+				workspace: params.workspace,
+				repo_slug: params.repo_slug,
+			});
+			if (repoDetails.mainbranch?.name) {
+				branch = repoDetails.mainbranch.name;
+				methodLogger.debug(`Using repository default branch: ${branch}`);
+			} else {
+				branch = 'main';
+				methodLogger.debug(
+					`No default branch found, falling back to: ${branch}`,
+				);
+			}
+		} catch (repoError) {
+			methodLogger.warn(
+				'Failed to get repository details, using fallback branch',
+				repoError,
+			);
+			branch = 'main';
+		}
+	}
+
+	const path = `${API_PATH}/repositories/${params.workspace}/${params.repo_slug}/src`;
+
+	// Bitbucket Source API requires multipart/form-data format
+	// Format: field name = file path (e.g., "/README.md"), field value = file content
+	// We'll create multipart/form-data manually since Node.js FormData may not work with fetch
+	// Prepare file path - Bitbucket expects the path to start with / for root files
+	const filePath = params.file_path.startsWith('/')
+		? params.file_path
+		: `/${params.file_path}`;
+
+	// Generate boundary for multipart/form-data
+	const boundary = `----WebKitFormBoundary${Date.now()}${Math.random().toString(36).substring(2, 15)}`;
+
+	// Build multipart/form-data body manually
+	const parts: string[] = [];
+
+	// Add file content (path as field name, content as value)
+	parts.push(`--${boundary}`);
+	parts.push(`Content-Disposition: form-data; name="${filePath}"`);
+	parts.push('');
+	parts.push(params.content);
+
+	// Add message
+	parts.push(`--${boundary}`);
+	parts.push(`Content-Disposition: form-data; name="message"`);
+	parts.push('');
+	parts.push(params.message);
+
+	// Add branch
+	parts.push(`--${boundary}`);
+	parts.push(`Content-Disposition: form-data; name="branch"`);
+	parts.push('');
+	parts.push(branch);
+
+	// Add author if provided
+	if (params.author) {
+		parts.push(`--${boundary}`);
+		parts.push(`Content-Disposition: form-data; name="author"`);
+		parts.push('');
+		parts.push(params.author);
+	}
+
+	// Close boundary
+	parts.push(`--${boundary}--`);
+	const multipartBody = parts.join('\r\n');
+
+	methodLogger.debug(`Sending POST request to: ${path}`, {
+		filePath,
+		contentLength: params.content.length,
+		branch,
+		message: params.message,
+		bodyLength: multipartBody.length,
+	});
+
+	try {
+		const rawData = await fetchAtlassian(credentials, path, {
+			method: 'POST',
+			body: multipartBody,
+			headers: {
+				'Content-Type': `multipart/form-data; boundary=${boundary}`,
+			},
+		});
+
+		// Handle empty response (Bitbucket Source API may return empty body on success)
+		if (
+			!rawData ||
+			(typeof rawData === 'object' && Object.keys(rawData).length === 0)
+		) {
+			methodLogger.debug(
+				'Empty response received, file operation likely succeeded',
+			);
+			// Return a minimal success response
+			// We'll need to get commit info separately or construct a basic response
+			return {
+				type: 'commit',
+				hash: 'unknown', // Will be populated if we can get it
+				date: new Date().toISOString(),
+				author: {
+					type: 'author',
+					raw: params.author || 'Unknown',
+				},
+				message: params.message,
+				parents: [],
+			};
+		}
+
+		// Validate response with Zod schema
+		try {
+			const validatedData =
+				FileOperationResponseSchema.parse(rawData);
+			methodLogger.debug(
+				'File created/updated successfully:',
+				validatedData,
+			);
+			return validatedData;
+		} catch (error) {
+			if (error instanceof z.ZodError) {
+				methodLogger.warn(
+					'Response does not match expected schema, but operation may have succeeded:',
+					error.format(),
+				);
+				methodLogger.debug('Raw response:', rawData);
+				// If response is not in expected format but we got a response,
+				// assume success and return minimal response
+				if (rawData && typeof rawData === 'object') {
+					return {
+						type: 'commit',
+						hash: (rawData as { hash?: string }).hash || 'unknown',
+						date:
+							(rawData as { date?: string }).date ||
+							new Date().toISOString(),
+						author:
+							(rawData as { author?: FileOperationResponse['author'] })
+								.author ||
+							{
+								type: 'author',
+								raw: params.author || 'Unknown',
+							},
+						message:
+							(rawData as { message?: string }).message ||
+							params.message,
+						parents:
+							(rawData as { parents?: FileOperationResponse['parents'] })
+								.parents || [],
+					};
+				}
+				// If we can't parse at all, return minimal success
+				return {
+					type: 'commit',
+					hash: 'unknown',
+					date: new Date().toISOString(),
+					author: {
+						type: 'author',
+						raw: params.author || 'Unknown',
+					},
+					message: params.message,
+					parents: [],
+				};
+			}
+			throw error;
+		}
+	} catch (error) {
+		if (error instanceof McpError) {
+			throw error;
+		}
+		// More specific error messages for common issues
+		if (error instanceof Error && error.message.includes('404')) {
+			throw createApiError(
+				`Repository not found: ${params.workspace}/${params.repo_slug}`,
+				404,
+				error,
+			);
+		}
+		if (error instanceof Error && error.message.includes('403')) {
+			throw createApiError(
+				`Permission denied: You don't have write access to ${params.workspace}/${params.repo_slug}`,
+				403,
+				error,
+			);
+		}
+		// Handle JSON parsing errors specifically
+		if (
+			error instanceof Error &&
+			error.message.includes('Unexpected end of JSON input')
+		) {
+			methodLogger.debug(
+				'Empty response from Bitbucket API, file operation likely succeeded',
+			);
+			// Return minimal success response
+			return {
+				type: 'commit',
+				hash: 'unknown',
+				date: new Date().toISOString(),
+				author: {
+					type: 'author',
+					raw: params.author || 'Unknown',
+				},
+				message: params.message,
+				parents: [],
+			};
+		}
+		throw createApiError(
+			`Failed to create/update file: ${error instanceof Error ? error.message : String(error)}`,
+			500,
+			error,
+		);
+	}
+}
+
 export default {
 	list,
 	get,
@@ -653,4 +938,5 @@ export default {
 	createBranch,
 	getFileContent,
 	listBranches,
+	createOrUpdateFile,
 };

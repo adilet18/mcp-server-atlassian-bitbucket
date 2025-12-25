@@ -12,6 +12,9 @@ import {
  * Interface for Atlassian API credentials
  */
 export interface AtlassianCredentials {
+	// OAuth Bearer token (highest priority)
+	oauthToken?: string;
+	useOAuth?: boolean;
 	// Standard Atlassian credentials
 	siteName?: string;
 	userEmail?: string;
@@ -49,7 +52,19 @@ export function getAtlassianCredentials(): AtlassianCredentials | null {
 		'getAtlassianCredentials',
 	);
 
-	// First try standard Atlassian credentials (preferred for consistency)
+	// First try OAuth Bearer token (highest priority for OAuth flow)
+	const oauthToken =
+		config.get('BITBUCKET_ACCESS_TOKEN') ||
+		config.get('BITBUCKET_OAUTH_TOKEN');
+	if (oauthToken) {
+		methodLogger.debug('Using OAuth Bearer token');
+		return {
+			oauthToken,
+			useOAuth: true,
+		};
+	}
+
+	// Second try standard Atlassian credentials (preferred for consistency)
 	const siteName = config.get('ATLASSIAN_SITE_NAME');
 	const userEmail = config.get('ATLASSIAN_USER_EMAIL');
 	const apiToken = config.get('ATLASSIAN_API_TOKEN');
@@ -80,7 +95,7 @@ export function getAtlassianCredentials(): AtlassianCredentials | null {
 
 	// If neither set of credentials is available, return null
 	methodLogger.warn(
-		'Missing Atlassian credentials. Please set either ATLASSIAN_SITE_NAME, ATLASSIAN_USER_EMAIL, and ATLASSIAN_API_TOKEN environment variables, or ATLASSIAN_BITBUCKET_USERNAME and ATLASSIAN_BITBUCKET_APP_PASSWORD for Bitbucket-specific auth.',
+		'Missing Atlassian credentials. Please set either BITBUCKET_ACCESS_TOKEN (OAuth), ATLASSIAN_USER_EMAIL and ATLASSIAN_API_TOKEN, or ATLASSIAN_BITBUCKET_USERNAME and ATLASSIAN_BITBUCKET_APP_PASSWORD.',
 	);
 	return null;
 }
@@ -107,7 +122,13 @@ export async function fetchAtlassian<T>(
 	// Set up auth headers based on credential type
 	let authHeader: string;
 
-	if (credentials.useBitbucketAuth) {
+	if (credentials.useOAuth) {
+		// OAuth Bearer token authentication
+		if (!credentials.oauthToken) {
+			throw createAuthInvalidError('Missing OAuth token');
+		}
+		authHeader = `Bearer ${credentials.oauthToken}`;
+	} else if (credentials.useBitbucketAuth) {
 		// Bitbucket API uses a different auth format
 		if (
 			!credentials.bitbucketUsername ||
@@ -137,18 +158,39 @@ export async function fetchAtlassian<T>(
 	const url = `${baseUrl}${normalizedPath}`;
 
 	// Set up authentication and headers
+	// Allow Content-Type to be overridden by options.headers
+	const defaultContentType =
+		options.headers?.['Content-Type'] || 'application/json';
 	const headers = {
 		Authorization: authHeader,
-		'Content-Type': 'application/json',
+		'Content-Type': defaultContentType,
 		Accept: 'application/json',
 		...options.headers,
 	};
+
+	// Prepare request body
+	// Handle different body types: string or JSON object
+	let requestBody: string | undefined;
+	if (options.body) {
+		if (typeof options.body === 'string') {
+			requestBody = options.body;
+		} else if (headers['Content-Type']?.includes('multipart/form-data')) {
+			// Multipart form data is already a string with boundary
+			requestBody = options.body as string;
+		} else if (
+			headers['Content-Type'] === 'application/x-www-form-urlencoded'
+		) {
+			requestBody = options.body as string;
+		} else {
+			requestBody = JSON.stringify(options.body);
+		}
+	}
 
 	// Prepare request options
 	const requestOptions: RequestInit = {
 		method: options.method || 'GET',
 		headers,
-		body: options.body ? JSON.stringify(options.body) : undefined,
+		body: requestBody,
 	};
 
 	methodLogger.debug(`Calling Atlassian API: ${url}`);
@@ -327,16 +369,30 @@ export async function fetchAtlassian<T>(
 		// For JSON responses, proceed as before
 		// Clone the response to log its content without consuming it
 		const clonedResponse = response.clone();
-		try {
-			const responseJson = await clonedResponse.json();
-			methodLogger.debug(`Response body:`, responseJson);
-		} catch {
-			methodLogger.debug(
-				`Could not parse response as JSON, returning raw content`,
-			);
+		const responseText = await clonedResponse.text();
+
+		// Handle empty response (some APIs return empty body on success)
+		if (!responseText || responseText.trim() === '') {
+			methodLogger.debug('Empty response body received');
+			// Return a minimal success object if response is empty
+			return {} as T;
 		}
 
-		return response.json() as Promise<T>;
+		try {
+			const responseJson = JSON.parse(responseText);
+			methodLogger.debug(`Response body:`, responseJson);
+			return responseJson as T;
+		} catch (parseError) {
+			methodLogger.debug(
+				`Could not parse response as JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+			);
+			methodLogger.debug(
+				`Response text (first 500 chars):`,
+				responseText.substring(0, 500),
+			);
+			// If it's not JSON, return as text (for text/plain responses)
+			return responseText as unknown as T;
+		}
 	} catch (error) {
 		clearTimeout(timeoutId);
 		methodLogger.error(`Request failed`, error);
@@ -374,7 +430,14 @@ export async function fetchAtlassian<T>(
 		// Handle JSON parsing errors
 		if (error instanceof SyntaxError) {
 			methodLogger.debug(`JSON parsing error: ${error.message}`);
-
+			// If it's "Unexpected end of JSON input", it might be an empty response
+			// which is valid for some Bitbucket API endpoints
+			if (error.message.includes('Unexpected end of JSON input')) {
+				methodLogger.debug(
+					'Empty JSON response detected, treating as success',
+				);
+				return {} as T;
+			}
 			throw createApiError(
 				`Invalid response format from Bitbucket API: ${error.message}`,
 				500,

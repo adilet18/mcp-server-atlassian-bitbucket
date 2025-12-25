@@ -285,3 +285,53 @@ export const ListBranchesToolArgs = z.object({
 });
 
 export type ListBranchesToolArgsType = z.infer<typeof ListBranchesToolArgs>;
+
+/**
+ * Schema for create-or-update-file tool arguments.
+ */
+export const CreateOrUpdateFileToolArgs = z.object({
+	workspaceSlug: z
+		.string()
+		.optional()
+		.describe(
+			'Workspace slug containing the repository. If not provided, the system will use your default workspace (either configured via BITBUCKET_DEFAULT_WORKSPACE or the first workspace in your account). Example: "myteam"',
+		),
+	repoSlug: z
+		.string()
+		.min(1, 'Repository slug is required')
+		.describe(
+			'Repository slug where the file will be created or updated. Example: "project-api"',
+		),
+	filePath: z
+		.string()
+		.min(1, 'File path is required')
+		.describe(
+			'Path to the file within the repository. For new directories, include the full path. Example: "README.md" or "src/main.js"',
+		),
+	content: z
+		.string()
+		.min(1, 'File content is required')
+		.describe(
+			'The content of the file. This will create a new file if it doesn\'t exist, or update the existing file if it does.',
+		),
+	message: z
+		.string()
+		.min(1, 'Commit message is required')
+		.describe('Commit message describing the change.'),
+	branch: z
+		.string()
+		.optional()
+		.describe(
+			'Branch name to commit the file to. If omitted, uses the repository\'s default branch.',
+		),
+	author: z
+		.string()
+		.optional()
+		.describe(
+			'Optional author name for the commit. If omitted, uses the authenticated user.',
+		),
+});
+
+export type CreateOrUpdateFileToolArgsType = z.infer<
+	typeof CreateOrUpdateFileToolArgs
+>;

@@ -335,3 +335,60 @@ export const BranchesResponseSchema = z.object({
 	values: z.array(BranchSchema),
 });
 export type BranchesResponse = z.infer<typeof BranchesResponseSchema>;
+
+/**
+ * Parameters for creating or updating a file in a repository
+ */
+export const CreateOrUpdateFileParamsSchema = z.object({
+	workspace: z.string(),
+	repo_slug: z.string(),
+	branch: z.string().optional(),
+	message: z.string(),
+	file_path: z.string(),
+	content: z.string(),
+	author: z.string().optional(),
+});
+export type CreateOrUpdateFileParams = z.infer<
+	typeof CreateOrUpdateFileParamsSchema
+>;
+
+/**
+ * Response schema for file creation/update operation
+ */
+export const FileOperationResponseSchema = z.object({
+	type: z.literal('commit'),
+	hash: z.string(),
+	date: z.string(),
+	author: z.object({
+		type: z.string(),
+		raw: z.string(),
+		user: z
+			.object({
+				type: z.string(),
+				username: z.string(),
+				display_name: z.string().optional(),
+				uuid: z.string(),
+				links: z.record(z.string(), z.unknown()).optional(),
+			})
+			.optional(),
+	}),
+	message: z.string(),
+	summary: z
+		.object({
+			type: z.string(),
+			raw: z.string(),
+			markup: z.string(),
+			html: z.string().optional(),
+		})
+		.optional(),
+	parents: z.array(
+		z.object({
+			type: z.string(),
+			hash: z.string(),
+		}),
+	),
+	links: z.record(z.string(), z.unknown()).optional(),
+});
+export type FileOperationResponse = z.infer<
+	typeof FileOperationResponseSchema
+>;
